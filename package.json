@@ -1,0 +1,21 @@
+{
+  "name": "ember-wilds",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --host",
+    "check": "tsx scripts/check-world.ts"
+  },
+  "dependencies": {
+    "three": "^0.180.0"
+  },
+  "devDependencies": {
+    "@types/three": "^0.186.0",
+    "tsx": "^4.20.5",
+    "typescript": "^5.6.3",
+    "vite": "^6.3.5"
+  }
+}
