@@ -21,6 +21,7 @@ import {
   compassLabel,
   facingLabel,
 } from './content';
+import { ASH_SPARKS, EMBER_SPARKS, HIT_STOP_KILL_SEC, HIT_STOP_SEC, cameraKick } from './hitfeel';
 import { Hud, type CraftRow, type PackView, type Panel } from './hud';
 import { applyHeroGear, createCreature, createHero, setCreatureFlash, type HeroMesh } from './models';
 import { clamp, smoothstep } from './noise';
@@ -110,6 +111,10 @@ interface Actor {
   timer: number;
   deadUntil: number;
   flash: number;
+  recoil: number;
+  recoilX: number;
+  recoilZ: number;
+  baseScale: number;
   group: THREE.Group;
   bar: THREE.Group;
   barFill: THREE.Mesh;
@@ -142,6 +147,7 @@ interface Floater {
   text: string;
   color: string;
   life: number;
+  kind: 'note' | 'hit' | 'kill';
 }
 
 interface LiveNode {
@@ -150,37 +156,54 @@ interface LiveNode {
   regenAt: number;
 }
 
+const SPARK_POOL = 200;
+
 class Sparks {
-  private positions = new Float32Array(240);
-  private velocities = new Float32Array(240);
-  private lives = new Float32Array(80);
-  private colors = new Float32Array(240);
+  private positions = new Float32Array(SPARK_POOL * 3);
+  private velocities = new Float32Array(SPARK_POOL * 3);
+  private lives = new Float32Array(SPARK_POOL);
+  private colors = new Float32Array(SPARK_POOL * 3);
   readonly points: THREE.Points;
 
   constructor() {
-    for (let i = 0; i < 80; i++) this.positions[i * 3 + 1] = -400;
+    for (let i = 0; i < SPARK_POOL; i++) this.positions[i * 3 + 1] = -400;
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(this.positions, 3));
     geo.setAttribute('color', new THREE.BufferAttribute(this.colors, 3));
     this.points = new THREE.Points(
       geo,
-      new THREE.PointsMaterial({ size: 0.14, vertexColors: true, transparent: true, depthWrite: false }),
+      new THREE.PointsMaterial({ size: 0.24, vertexColors: true, transparent: true, depthWrite: false }),
     );
     this.points.frustumCulled = false;
   }
 
   burst(x: number, y: number, z: number, hex: number, count: number): void {
-    const color = new THREE.Color(hex);
+    this.spray(x, y, z, count, [hex], 3.2, 2.2, 0.05);
+  }
+
+  hit(x: number, y: number, z: number): void {
+    this.spray(x, y, z, 18, EMBER_SPARKS, 4.6, 2.8, 0.42);
+  }
+
+  killPuff(x: number, y: number, z: number): void {
+    this.spray(x, y, z, 28, EMBER_SPARKS, 5.6, 3.6, 0.7);
+    this.spray(x, y + 0.15, z, 20, ASH_SPARKS, 3.6, 2.8, 0.85);
+  }
+
+  private spray(x: number, y: number, z: number, count: number, palette: readonly number[], speed: number, lift: number, spread: number): void {
     let spawned = 0;
-    for (let i = 0; i < 80 && spawned < count; i++) {
+    for (let i = 0; i < SPARK_POOL && spawned < count; i++) {
       if (this.lives[i] > 0) continue;
-      this.lives[i] = 0.28 + Math.random() * 0.28;
-      this.positions[i * 3] = x;
-      this.positions[i * 3 + 1] = y;
-      this.positions[i * 3 + 2] = z;
-      this.velocities[i * 3] = (Math.random() - 0.5) * 3.2;
-      this.velocities[i * 3 + 1] = 1.4 + Math.random() * 2.2;
-      this.velocities[i * 3 + 2] = (Math.random() - 0.5) * 3.2;
+      const color = new THREE.Color(palette[spawned % palette.length]);
+      const ang = Math.random() * Math.PI * 2;
+      const rad = Math.random() * spread;
+      this.lives[i] = 0.32 + Math.random() * 0.3;
+      this.positions[i * 3] = x + Math.cos(ang) * rad;
+      this.positions[i * 3 + 1] = y + (Math.random() - 0.25) * spread;
+      this.positions[i * 3 + 2] = z + Math.sin(ang) * rad;
+      this.velocities[i * 3] = Math.cos(ang) * speed * (0.4 + Math.random());
+      this.velocities[i * 3 + 1] = lift * (0.4 + Math.random());
+      this.velocities[i * 3 + 2] = Math.sin(ang) * speed * (0.4 + Math.random());
       this.colors[i * 3] = color.r;
       this.colors[i * 3 + 1] = color.g;
       this.colors[i * 3 + 2] = color.b;
@@ -189,7 +212,7 @@ class Sparks {
   }
 
   update(dt: number): void {
-    for (let i = 0; i < 80; i++) {
+    for (let i = 0; i < SPARK_POOL; i++) {
       if (this.lives[i] <= 0) continue;
       this.lives[i] -= dt;
       this.velocities[i * 3 + 1] -= 7 * dt;
@@ -290,6 +313,15 @@ export class Game {
   private footCd = 0;
   private hurtV = 0;
   private shake = 0;
+  private hitStop = 0;
+  private kick = 0;
+  private kickTime = 0;
+  private impactLife = 0;
+  private impactMax = 0.2;
+  private puffLife = 0;
+  private puffMax = 0.48;
+  private impactGlow: THREE.Mesh;
+  private puffRing: THREE.Mesh;
   private burnAcc = 0;
   private burnNote = 0;
   private timeOfDay = 0.24 * DAY_SECONDS;
@@ -358,6 +390,30 @@ export class Game {
     );
     this.shock.rotation.x = -Math.PI / 2;
     this.shock.visible = false;
+    this.impactGlow = new THREE.Mesh(
+      new THREE.SphereGeometry(0.32, 10, 8),
+      new THREE.MeshBasicMaterial({
+        color: 0xfff4e2,
+        transparent: true,
+        opacity: 0,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+      }),
+    );
+    this.impactGlow.visible = false;
+    this.puffRing = new THREE.Mesh(
+      new THREE.RingGeometry(0.22, 0.52, 28),
+      new THREE.MeshBasicMaterial({
+        color: 0xff8a3c,
+        side: THREE.DoubleSide,
+        transparent: true,
+        opacity: 0,
+        depthWrite: false,
+      }),
+    );
+    this.puffRing.rotation.x = -Math.PI / 2;
+    this.puffRing.visible = false;
+    this.scene.add(this.impactGlow, this.puffRing);
     this.exploreCanvas.width = MAP_RES;
     this.exploreCanvas.height = MAP_RES;
     const ctx = this.exploreCanvas.getContext('2d');
@@ -430,8 +486,13 @@ export class Game {
     this.last = now;
     if (dt > 0.05) dt = 0.05;
     if (dt < 0) dt = 0;
+    const frameDt = dt;
+    if (this.hitStop > 0) {
+      this.hitStop = Math.max(0, this.hitStop - frameDt);
+      dt = 0;
+    }
     this.clock += dt;
-    this.animateWorld(dt);
+    this.animateWorld(dt, frameDt);
     if (this.mode === 'title') this.updateTitle(dt);
     else if (this.mode === 'dead') {
       this.deathT -= dt;
@@ -440,7 +501,7 @@ export class Game {
       if (this.panel === 'none') this.updatePlay(dt);
       else this.hotkeys();
     }
-    this.updateCamera(dt);
+    this.updateCamera(frameDt);
     this.drawMaps();
     this.syncHud();
     this.composer.render();
@@ -677,18 +738,40 @@ export class Game {
 
   private damageActor(actor: Actor, amount: number, knock: number): void {
     if (actor.state === 'dead') return;
+    const killing = actor.hp <= amount;
     actor.hp -= amount;
-    actor.flash = 0.16;
+    actor.flash = killing ? 0.34 : 0.28;
     const dx = actor.x - this.player.x;
     const dz = actor.z - this.player.z;
     const dist = Math.hypot(dx, dz) || 1;
-    actor.x += (dx / dist) * knock * 0.35;
-    actor.z += (dz / dist) * knock * 0.35;
-    this.float(actor.x, actor.y + 1.8, actor.z, `${Math.round(amount)}`, '#ffe7c2');
-    this.sparks.burst(actor.x, actor.y + 1, actor.z, 0xffe1c4, 6);
-    this.shake = Math.min(1, this.shake + 0.12);
-    if (actor.hp <= 0) this.kill(actor);
+    const nx = dx / dist;
+    const nz = dz / dist;
+    actor.x += nx * knock * 0.35;
+    actor.z += nz * knock * 0.35;
+    actor.recoil = 1;
+    actor.recoilX = nx;
+    actor.recoilZ = nz;
+    const radius = CREATURES[actor.spawn.kind].radius;
+    const ix = actor.x - nx * radius * 0.85;
+    const iy = actor.y + 1.05;
+    const iz = actor.z - nz * radius * 0.85;
+    // No crits in this game — a killing blow is the golden pop.
+    this.float(ix, iy + (killing ? 0.85 : 0.55), iz, `${Math.round(amount)}`, killing ? '#ffd56a' : '#fff6ea', killing ? 'kill' : 'hit');
+    if (killing) this.sparks.killPuff(ix, iy, iz);
+    else this.sparks.hit(ix, iy, iz);
+    this.flashImpact(ix, iy, iz, killing);
+    this.kick = killing ? 1 : 0.78;
+    this.hitStop = Math.max(this.hitStop, killing ? HIT_STOP_KILL_SEC : HIT_STOP_SEC);
+    if (killing) this.kill(actor);
     else if (actor.state === 'idle') actor.state = 'chase';
+  }
+
+  private flashImpact(x: number, y: number, z: number, killing: boolean): void {
+    this.impactMax = killing ? 0.32 : 0.2;
+    this.impactLife = this.impactMax;
+    this.impactGlow.position.set(x, y, z);
+    this.impactGlow.visible = true;
+    (this.impactGlow.material as THREE.MeshBasicMaterial).color.setHex(killing ? 0xffd56a : 0xfff6ea);
   }
 
   private kill(actor: Actor): void {
@@ -709,7 +792,12 @@ export class Game {
       }
     }
     this.run.kills += 1;
-    this.sparks.burst(actor.x, actor.y + 0.8, actor.z, 0xff7a3c, 12);
+    this.puffMax = 0.5;
+    this.puffLife = this.puffMax;
+    this.puffRing.position.set(actor.x, actor.y + 0.22, actor.z);
+    this.puffRing.scale.setScalar(0.35);
+    this.puffRing.visible = true;
+    (this.puffRing.material as THREE.MeshBasicMaterial).opacity = 0.85;
     if (actor.spawn.kind === 'warden') {
       this.run.bossDefeated = true;
       this.audio.play('boss');
@@ -921,11 +1009,16 @@ export class Game {
       const fly = def.flying ? 2.15 + Math.sin(this.clock * 2 + actor.bob) * 0.35 : 0;
       const sink = actor.spawn.kind === 'lurker' && actor.state === 'idle' && distP > def.aggro ? 0.55 : 0;
       actor.y = this.w.heightAt(actor.x, actor.z);
-      actor.group.position.set(actor.x, actor.y + fly - sink, actor.z);
+      const recoil = actor.recoil * 0.82;
+      actor.group.position.set(actor.x + actor.recoilX * recoil, actor.y + fly - sink, actor.z + actor.recoilZ * recoil);
       actor.group.rotation.y = actor.yaw;
+      actor.recoil = Math.max(0, actor.recoil - dt * 5.4);
       if (actor.flash > 0) {
         actor.flash = Math.max(0, actor.flash - dt);
-        setCreatureFlash(actor.group, actor.flash * 6);
+        setCreatureFlash(actor.group, actor.flash * 7);
+        actor.group.scale.setScalar(actor.baseScale * (1 + Math.min(0.14, actor.flash * 0.5)));
+      } else {
+        actor.group.scale.setScalar(actor.baseScale);
       }
       const angry = actor.state === 'chase' || actor.state === 'windup' || actor.state === 'charge' || actor.hp < actor.maxHp;
       actor.bar.visible = distP < 26 && angry;
@@ -1039,6 +1132,10 @@ export class Game {
     actor.x = actor.homeX;
     actor.z = actor.homeZ;
     actor.deadUntil = 0;
+    actor.flash = 0;
+    actor.recoil = 0;
+    setCreatureFlash(actor.group, 0);
+    actor.group.scale.setScalar(actor.baseScale);
     actor.group.visible = true;
   }
 
@@ -1476,6 +1573,10 @@ export class Game {
       timer: 0,
       deadUntil: 0,
       flash: 0,
+      recoil: 0,
+      recoilX: 0,
+      recoilZ: 0,
+      baseScale: group.scale.x || 1,
       group,
       bar,
       barFill,
@@ -1519,6 +1620,9 @@ export class Game {
       actor.y = this.w.heightAt(actor.x, actor.z);
       actor.timer = 0;
       actor.flash = 0;
+      actor.recoil = 0;
+      setCreatureFlash(actor.group, 0);
+      actor.group.scale.setScalar(actor.baseScale);
       if (actor.spawn.summon || (actor.spawn.kind === 'warden' && this.run.bossDefeated)) {
         actor.hp = 0;
         actor.state = 'dead';
@@ -1616,6 +1720,7 @@ export class Game {
 
   private updateCamera(dt: number): void {
     this.shake = Math.max(0, this.shake - dt * 1.5);
+    this.kickTime += dt;
     const sun = this.sunState();
     const focus = this.mode === 'title' ? this.w.spawn : this.player;
     if (this.mode !== 'title') {
@@ -1634,6 +1739,12 @@ export class Game {
       const mag = this.shake * this.shake;
       this.camera.position.x += Math.sin(this.clock * 46) * mag * 0.32;
       this.camera.position.y += Math.cos(this.clock * 33) * mag * 0.22;
+      if (this.kick > 0) {
+        const kick = cameraKick(this.kickTime, this.kick);
+        this.camera.position.x += kick.x;
+        this.camera.position.y += kick.y;
+        this.kick = Math.max(0, this.kick - dt * 6.2);
+      }
     }
     this.scenery?.sky.position.copy(this.camera.position);
     if (this.scenery) this.scenery.stars.position.copy(this.camera.position);
@@ -1653,6 +1764,7 @@ export class Game {
     this.fogColor.set(sun.night > 0.6 ? '#1a2030' : sun.low > 0.45 ? '#e39a6a' : '#cbb79a');
     if (this.w.biomeAt(focus.x, focus.z) === 'lava') this.fogColor.lerp(new THREE.Color('#6a3a2c'), 0.35);
     this.fog.color.copy(this.fogColor);
+    this.tickImpact(dt);
     if (this.scenery) {
       this.scenery.skyMat.uniforms.uSunElev.value = sun.sunElev;
       this.scenery.skyMat.uniforms.uSunAz.value = sun.sunAz;
@@ -1661,7 +1773,25 @@ export class Game {
       this.scenery.waterMat.uniforms.uNight.value = sun.night;
       (this.scenery.stars.material as THREE.PointsMaterial).opacity = sun.night * 0.9;
     }
-    void dt;
+  }
+
+  private tickImpact(dt: number): void {
+    if (this.impactLife > 0) {
+      this.impactLife = Math.max(0, this.impactLife - dt);
+      const u = this.impactMax > 0 ? this.impactLife / this.impactMax : 0;
+      const mat = this.impactGlow.material as THREE.MeshBasicMaterial;
+      mat.opacity = Math.max(0, u) * 0.95;
+      this.impactGlow.scale.setScalar(0.7 + (1 - u) * 2.6);
+      this.impactGlow.visible = u > 0.03;
+    }
+    if (this.puffLife > 0) {
+      this.puffLife = Math.max(0, this.puffLife - dt);
+      const u = this.puffMax > 0 ? this.puffLife / this.puffMax : 0;
+      const mat = this.puffRing.material as THREE.MeshBasicMaterial;
+      mat.opacity = Math.max(0, u) * 0.82;
+      this.puffRing.scale.setScalar(0.4 + (1 - u) * 3.6);
+      this.puffRing.visible = u > 0.03;
+    }
   }
 
   private sunState(): { tod: number; sunElev: number; sunAz: number; day: number; low: number; night: number } {
@@ -1673,8 +1803,8 @@ export class Game {
     return { tod, sunElev, sunAz, day, low, night: 1 - day };
   }
 
-  private animateWorld(dt: number): void {
-    this.sparks.update(dt);
+  private animateWorld(_dt: number, frameDt: number): void {
+    this.sparks.update(frameDt);
     if (!this.scenery) return;
     this.scenery.waterMat.uniforms.uTime.value = this.clock;
     const pos = this.scenery.motePositions;
@@ -1803,7 +1933,7 @@ export class Game {
       `Heartwine ${this.run.heartwine} · Kindling ${this.run.kindling}`,
     );
     this.hud.setPrompt(this.mode === 'play' && this.panel === 'none' ? this.prompt() : '');
-    const projected: { x: number; y: number; text: string; color: string; life: number }[] = [];
+    const projected: { x: number; y: number; text: string; color: string; life: number; kind: 'note' | 'hit' | 'kill' }[] = [];
     for (let i = this.floaters.length - 1; i >= 0; i--) {
       const floater = this.floaters[i];
       floater.life -= 0.016;
@@ -1820,6 +1950,7 @@ export class Game {
         text: floater.text,
         color: floater.color,
         life: floater.life,
+        kind: floater.kind,
       });
     }
     this.hud.setFloaters(projected.slice(0, 16));
@@ -1827,8 +1958,8 @@ export class Game {
     this.audio.update(this.w.biomeAt(this.player.x, this.player.z), sun.night, this.combat);
   }
 
-  private float(x: number, y: number, z: number, text: string, color: string): void {
-    this.floaters.push({ x, y, z, text, color, life: 1 });
+  private float(x: number, y: number, z: number, text: string, color: string, kind: 'note' | 'hit' | 'kill' = 'note'): void {
+    this.floaters.push({ x, y, z, text, color, life: kind === 'kill' ? 1.15 : 0.95, kind });
     if (this.floaters.length > 16) this.floaters.shift();
   }
 

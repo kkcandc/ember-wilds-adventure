@@ -46,6 +46,7 @@ interface Floater {
   text: string;
   color: string;
   life: number;
+  kind?: 'note' | 'hit' | 'kill';
 }
 
 export class Hud {
@@ -302,10 +303,13 @@ export class Hud {
         el.classList.add('hidden');
         continue;
       }
-      el.classList.remove('hidden');
+      el.classList.remove('hidden', 'hit', 'kill');
+      if (item.kind === 'hit') el.classList.add('hit');
+      if (item.kind === 'kill') el.classList.add('kill');
       el.style.left = `${item.x}px`;
       el.style.top = `${item.y}px`;
       el.style.color = item.color;
+      el.style.fontSize = item.kind === 'kill' ? '36px' : item.kind === 'hit' ? '23px' : '18px';
       el.style.opacity = String(Math.max(0, item.life));
       el.textContent = item.text;
     }

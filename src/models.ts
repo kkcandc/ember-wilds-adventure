@@ -246,8 +246,9 @@ export function setCreatureFlash(group: THREE.Group, amount: number): void {
     const base = material.userData.baseE as THREE.Color | undefined;
     if (!base || !material.emissive) return;
     if (amount > 0.02) {
-      material.emissive.setHex(0xfff4e8);
-      material.emissiveIntensity = amount;
+      const hot = Math.min(1, amount / 1.6);
+      material.emissive.setRGB(1, 0.42 + hot * 0.52, 0.18 + hot * 0.62);
+      material.emissiveIntensity = 1.15 + amount * 1.4;
     } else {
       material.emissive.copy(base);
       material.emissiveIntensity = material.userData.baseI as number;

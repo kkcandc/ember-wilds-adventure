@@ -197,6 +197,20 @@ kbd {
   transform: translate(-50%, -50%);
   text-shadow: 0 2px 6px rgba(0, 0, 0, 0.7);
 }
+.floater.hit {
+  font-weight: 700;
+  text-shadow: 0 0 8px rgba(255, 220, 180, 0.8), 0 2px 6px rgba(0, 0, 0, 0.75);
+}
+.floater.kill {
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-shadow: 0 0 16px rgba(255, 186, 64, 0.95), 0 2px 8px rgba(0, 0, 0, 0.8);
+  animation: floater-pop 0.42s ease-out;
+}
+@keyframes floater-pop {
+  0% { transform: translate(-50%, -50%) scale(1.6); }
+  100% { transform: translate(-50%, -50%) scale(1); }
+}
 #toasts {
   position: fixed;
   top: 22px;

@@ -1,4 +1,7 @@
 import { Game } from './game';
+import { BUILD_MARKER } from './hitfeel';
+
+console.info(BUILD_MARKER);
 
 const canvas = document.querySelector('#game');
 const ui = document.querySelector('#ui');
