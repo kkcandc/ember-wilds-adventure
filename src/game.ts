@@ -2306,7 +2306,23 @@ export class Game {
 
   private exposeDebug(): void {
     const api = {
-      pos: () => ({ x: this.player.x, z: this.player.z, biome: this.w.biomeAt(this.player.x, this.player.z), hp: this.hp }),
+      pos: () => ({ x: this.player.x, z: this.player.z, yaw: this.yaw, biome: this.w.biomeAt(this.player.x, this.player.z), hp: this.hp, kills: this.run.kills, wood: this.run.mats.wood }),
+      creatures: () => this.actors.filter((actor) => actor.state !== 'dead').map((actor) => ({
+        id: actor.spawn.id,
+        kind: actor.spawn.kind,
+        x: actor.x,
+        z: actor.z,
+        hp: actor.hp,
+        dist: Math.hypot(actor.x - this.player.x, actor.z - this.player.z),
+      })),
+      nodes: () => this.w.nodes.flatMap((node) => {
+        const live = this.nodes.get(node.id);
+        if (!live || live.amount <= 0) return [];
+        return [{ id: node.id, kind: node.kind, x: node.x, z: node.z, dist: Math.hypot(node.x - this.player.x, node.z - this.player.z) }];
+      }),
+      lookAt: (x: number, z: number) => {
+        this.yaw = Math.atan2(-(x - this.player.x), -(z - this.player.z));
+      },
       give: () => {
         this.run.mats.wood += 20;
         this.run.mats.stone += 20;
