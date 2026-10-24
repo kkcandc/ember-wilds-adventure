@@ -1,10 +1,8 @@
 /** Combat hit-feel for Ember Wilds.
  * The shared kit at github.com/kkcandc/web-demo-juice-kit only publishes a
  * README, so these beats — hit-stop, camera kick, ember sparks, pop numbers —
- * live here with no extra dependencies.
+ * live here with no extra dependencies. The page build marker lives in worldfeel.
  */
-
-export const BUILD_MARKER = 'ember-wilds build hitfeel-2026-10-17';
 
 /** Real-time freeze on a landed hit. ~55ms, ~70ms on a kill. */
 export const HIT_STOP_SEC = 0.055;

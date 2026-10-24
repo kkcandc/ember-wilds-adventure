@@ -22,6 +22,7 @@ import {
   facingLabel,
 } from './content';
 import { ASH_SPARKS, EMBER_SPARKS, HIT_STOP_KILL_SEC, HIT_STOP_SEC, cameraKick } from './hitfeel';
+import { BASE_FOV, GrassPart, LAND_SEC, StrideFx, squashScale, strideFov, strideLean } from './worldfeel';
 import { Hud, type CraftRow, type PackView, type Panel } from './hud';
 import { applyHeroGear, createCreature, createHero, setCreatureFlash, type HeroMesh } from './models';
 import { clamp, smoothstep } from './noise';
@@ -262,7 +263,7 @@ function disposeMaterials(root: THREE.Object3D): void {
 export class Game {
   private renderer: THREE.WebGLRenderer;
   private scene = new THREE.Scene();
-  private camera = new THREE.PerspectiveCamera(66, 1, 0.08, 520);
+  private camera = new THREE.PerspectiveCamera(BASE_FOV, 1, 0.08, 520);
   private composer: EffectComposer;
   private hemi: THREE.HemisphereLight;
   private dir: THREE.DirectionalLight;
@@ -272,6 +273,8 @@ export class Game {
   private hud: Hud;
   private audio = new AudioBus();
   private sparks = new Sparks();
+  private stride = new StrideFx();
+  private grassPart = new GrassPart();
   private hero: HeroMesh;
   private blob: THREE.Mesh;
   private shock: THREE.Mesh;
@@ -311,6 +314,10 @@ export class Game {
   private moved = 0;
   private gatherCd = 0;
   private footCd = 0;
+  private sprinting = false;
+  private landAge = -1;
+  private heroLean = 0;
+  private landDip = 0;
   private hurtV = 0;
   private shake = 0;
   private hitStop = 0;
@@ -370,12 +377,13 @@ export class Game {
     this.dir.shadow.bias = -0.0004;
     this.lantern = new THREE.PointLight(0xffb15a, 0, 18, 1.6);
     this.calderaLight = new THREE.PointLight(0xff5a24, 2, 28, 1.4);
-    this.scene.add(this.hemi, this.dir, this.dir.target, this.lantern, this.calderaLight, this.worldRoot, this.sparks.points);
+    this.scene.add(this.hemi, this.dir, this.dir.target, this.lantern, this.calderaLight, this.worldRoot, this.sparks.points, this.stride.root);
     this.composer = new EffectComposer(this.renderer);
     this.composer.addPass(new RenderPass(this.scene, this.camera));
     this.composer.addPass(new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.22, 0.38, 0.88));
     this.composer.addPass(new OutputPass());
     this.hero = createHero();
+    this.hero.group.rotation.order = 'YXZ';
     this.hero.group.visible = false;
     this.scene.add(this.hero.group);
     this.blob = new THREE.Mesh(
@@ -582,7 +590,12 @@ export class Game {
     const wishZ = fz * iz + rz * ix;
     const groundHere = this.w.heightAt(this.player.x, this.player.z);
     const wet = groundHere < WATER_LEVEL + 0.25;
+    if (this.landAge >= 0) {
+      this.landAge += dt;
+      if (this.landAge > LAND_SEC) this.landAge = -1;
+    }
     const sprinting = this.keys.has('ShiftLeft') && moving && this.stamina > (this.sprintLock ? 14 : 0) && !this.guarding;
+    this.sprinting = sprinting;
     if (sprinting) {
       this.stamina -= 17 * dt;
       if (this.stamina <= 0) {
@@ -627,21 +640,40 @@ export class Game {
     this.player.y += this.player.vy * dt;
     const ground = this.w.heightAt(this.player.x, this.player.z);
     if (this.player.y <= ground) {
+      const fall = -this.player.vy;
       this.player.y = ground;
       this.player.vy = 0;
+      if (!this.grounded && fall > 4.5) {
+        this.landAge = 0;
+        this.stride.land(this.player.x, this.player.y, this.player.z);
+      }
       this.grounded = true;
     } else this.grounded = false;
-    if (moving && this.grounded) {
+    let dirX = wishX;
+    let dirZ = wishZ;
+    if (this.dashT > 0) {
+      dirX = this.dashX;
+      dirZ = this.dashZ;
+    }
+    if (moving && this.grounded && this.dashT <= 0) {
       this.footCd -= dt;
       if (this.footCd <= 0) {
         this.footCd = sprinting ? 0.28 : 0.42;
         this.audio.footsteps();
+        this.stride.foot(this.player.x, this.player.y, this.player.z, dirX, dirZ, sprinting);
       }
     }
+    const strideAmount = this.dashT > 0 ? 1 : sprinting ? 0.62 : 0;
+    this.stride.aim(this.player.x, this.player.y, this.player.z, dirX, dirZ, strideAmount, dt);
     const bob = moving && this.grounded ? Math.sin(this.clock * (sprinting ? 12 : 8)) * 0.045 : 0;
+    const squash = squashScale(this.landAge, this.stride.reduced);
+    const leanTarget = strideLean(strideAmount, this.stride.reduced);
+    this.heroLean += (leanTarget - this.heroLean) * (1 - Math.exp(-10 * dt));
+    this.landDip = this.stride.reduced || squash[1] >= 1 ? 0 : (1 - squash[1]) * 0.42;
     this.hero.group.visible = this.thirdPerson;
     this.hero.group.position.set(this.player.x, this.player.y + bob, this.player.z);
-    this.hero.group.rotation.y = this.yaw;
+    this.hero.group.rotation.set(this.heroLean, this.yaw, 0);
+    this.hero.group.scale.set(squash[0], squash[1], squash[2]);
     const swingT = this.swing > 0 ? 1 - this.swing / 0.22 : 0;
     this.hero.hand.rotation.x = -0.55 - Math.sin(swingT * Math.PI) * 1.45;
     this.blob.position.set(this.player.x, this.player.y + 0.06, this.player.z);
@@ -1510,6 +1542,12 @@ export class Game {
     this.mode = 'title';
     this.panel = 'none';
     this.hero.group.visible = false;
+    this.hero.group.scale.set(1, 1, 1);
+    this.hero.group.rotation.x = 0;
+    this.heroLean = 0;
+    this.landAge = -1;
+    this.landDip = 0;
+    this.sprinting = false;
     this.blob.visible = false;
     this.hud.showTitle();
     this.hud.setPanel('none');
@@ -1534,6 +1572,7 @@ export class Game {
     for (const shot of this.shots) shot.mesh.removeFromParent();
     this.shots = [];
     this.scenery?.dispose();
+    this.grassPart.reset();
     this.worldRoot.clear();
     this.world = createWorld(seed);
     this.scenery = buildScenery(this.world);
@@ -1719,13 +1758,17 @@ export class Game {
   }
 
   private updateCamera(dt: number): void {
+    if (this.mode !== 'play' || this.panel !== 'none') {
+      this.sprinting = false;
+      this.stride.aim(this.player.x, this.player.y, this.player.z, 0, 0, 0, 0);
+    }
     this.shake = Math.max(0, this.shake - dt * 1.5);
     this.kickTime += dt;
     const sun = this.sunState();
     const focus = this.mode === 'title' ? this.w.spawn : this.player;
     if (this.mode !== 'title') {
       this.look.set(0, 0, -1).applyEuler(new THREE.Euler(this.pitch, this.yaw, 0, 'YXZ'));
-      this.eye.set(this.player.x, this.player.y + 1.55, this.player.z);
+      this.eye.set(this.player.x, this.player.y + 1.55 - this.landDip, this.player.z);
       if (this.thirdPerson) {
         this.camera.position.copy(this.eye).addScaledVector(this.look, -5.7);
         this.camera.position.y += 0.45;
@@ -1745,6 +1788,17 @@ export class Game {
         this.camera.position.y += kick.y;
         this.kick = Math.max(0, this.kick - dt * 6.2);
       }
+      const strideAmount = this.mode === 'play' && this.panel === 'none' ? (this.dashT > 0 ? 1 : this.sprinting ? 0.62 : 0) : 0;
+      const nextFov = strideFov(this.camera.fov, strideAmount, dt, this.stride.reduced);
+      if (Math.abs(nextFov - this.camera.fov) > 0.02) {
+        this.camera.fov = nextFov;
+        this.camera.updateProjectionMatrix();
+      } else if (nextFov !== this.camera.fov) {
+        this.camera.fov = nextFov;
+      }
+    } else if (Math.abs(this.camera.fov - BASE_FOV) > 0.02) {
+      this.camera.fov = BASE_FOV;
+      this.camera.updateProjectionMatrix();
     }
     this.scenery?.sky.position.copy(this.camera.position);
     if (this.scenery) this.scenery.stars.position.copy(this.camera.position);
@@ -1805,6 +1859,8 @@ export class Game {
 
   private animateWorld(_dt: number, frameDt: number): void {
     this.sparks.update(frameDt);
+    this.stride.update(frameDt);
+    this.grassPart.sync(this.scenery?.grass ?? null, this.player.x, this.player.z, this.mode === 'play' && !this.stride.reduced);
     if (!this.scenery) return;
     this.scenery.waterMat.uniforms.uTime.value = this.clock;
     const pos = this.scenery.motePositions;
@@ -2307,6 +2363,9 @@ export class Game {
   private exposeDebug(): void {
     const api = {
       pos: () => ({ x: this.player.x, z: this.player.z, yaw: this.yaw, biome: this.w.biomeAt(this.player.x, this.player.z), hp: this.hp, kills: this.run.kills, wood: this.run.mats.wood }),
+      fov: () => this.camera.fov,
+      reduced: () => this.stride.reduced,
+      pose: () => ({ sy: this.hero.group.scale.y, lean: this.heroLean, fov: this.camera.fov }),
       creatures: () => this.actors.filter((actor) => actor.state !== 'dead').map((actor) => ({
         id: actor.spawn.id,
         kind: actor.spawn.kind,
