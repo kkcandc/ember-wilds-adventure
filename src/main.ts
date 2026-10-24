@@ -1,6 +1,13 @@
 import { Game } from './game';
-import { BUILD_MARKER } from './hitfeel';
+import { BUILD_MARKER } from './worldfeel';
 
+declare global {
+  interface Window {
+    __BUILD__?: string;
+  }
+}
+
+window.__BUILD__ = BUILD_MARKER;
 console.info(BUILD_MARKER);
 
 const canvas = document.querySelector('#game');

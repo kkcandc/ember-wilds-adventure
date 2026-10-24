@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { WATER_LEVEL } from './content';
 import { hash2 } from './noise';
+import type { GrassField } from './worldfeel';
 import type { WorldData } from './worldgen';
 import type { MaterialId } from './types';
 
@@ -28,6 +29,7 @@ export interface Scenery {
   motePositions: Float32Array;
   moteBase: Float32Array;
   moteAttr: THREE.BufferAttribute;
+  grass: GrassField | null;
   dispose: () => void;
 }
 
@@ -192,7 +194,7 @@ export function buildScenery(world: WorldData): Scenery {
     const color = p.variant === 1 ? '#4a403c' : p.variant === 2 ? '#8a8494' : '#6d6458';
     return { matrix: dummy.matrix, color: new THREE.Color(color) };
   });
-  addInstances(root, disposables, grassGeo, world.grasses, (p) => {
+  const grassMesh = addInstances(root, disposables, grassGeo, world.grasses, (p) => {
     const dummy = new THREE.Object3D();
     dummy.position.set(p.x, p.y + 0.25 * p.scale, p.z);
     dummy.scale.setScalar(p.scale);
@@ -200,6 +202,14 @@ export function buildScenery(world: WorldData): Scenery {
     dummy.updateMatrix();
     return { matrix: dummy.matrix, color: new THREE.Color().setHSL(0.28, 0.45, 0.32 + (p.scale % 0.15)) };
   });
+  const grass: GrassField | null = grassMesh
+    ? {
+        mesh: grassMesh,
+        tufts: world.grasses.map((p) => ({ x: p.x, y: p.y, z: p.z, rot: p.rot, scale: p.scale })),
+        base: new Float32Array(grassMesh.instanceMatrix.array),
+      }
+    : null;
+  if (grassMesh) grassMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
   addInstances(root, disposables, grassGeo, world.reeds, (p) => {
     const dummy = new THREE.Object3D();
     dummy.position.set(p.x, p.y + 0.35 * p.scale, p.z);
@@ -381,6 +391,7 @@ export function buildScenery(world: WorldData): Scenery {
     motePositions,
     moteBase,
     moteAttr,
+    grass,
     dispose() {
       root.traverse((obj) => {
         const mesh = obj as THREE.Mesh;
@@ -436,8 +447,8 @@ function addInstances<T>(
   geo: THREE.BufferGeometry,
   props: T[],
   place: (prop: T, index: number) => { matrix: THREE.Matrix4; color: THREE.Color },
-): void {
-  if (props.length === 0) return;
+): THREE.InstancedMesh | null {
+  if (props.length === 0) return null;
   const material = new THREE.MeshLambertMaterial({ flatShading: true });
   const mesh = new THREE.InstancedMesh(geo, material, props.length);
   mesh.castShadow = false;
@@ -452,6 +463,7 @@ function addInstances<T>(
   if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
   root.add(mesh);
   disposables.push({ mat: material });
+  return mesh;
 }
 
 function buildNode(kind: MaterialId): THREE.Group {
